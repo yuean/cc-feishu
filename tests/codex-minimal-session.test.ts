@@ -260,8 +260,20 @@ async function main() {
       },
       {
         phase: 'turn_running',
+        reason: 'Codex 已开始处理当前轮次',
+        method: undefined,
+        turnId: 'turn-activity',
+      },
+      {
+        phase: 'turn_running',
         reason: 'item completed (agentMessage)',
         method: 'item/completed',
+        turnId: 'turn-activity',
+      },
+      {
+        phase: 'turn_running',
+        reason: 'Codex 回复内容已更新',
+        method: undefined,
         turnId: 'turn-activity',
       },
     ]);

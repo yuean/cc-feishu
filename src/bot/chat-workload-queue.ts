@@ -60,8 +60,8 @@ export class ChatWorkloadQueue<TTask> {
     this.describeTask = options.describeTask;
     this.processTask = options.processTask;
     this.longRunningNotifier = options.longRunningNotifier;
-    this.longTaskNoticeFirstMs = options.longTaskNoticeFirstMs ?? 30 * 1000;
-    this.longTaskNoticeIntervalMs = options.longTaskNoticeIntervalMs ?? 60 * 1000;
+    this.longTaskNoticeFirstMs = options.longTaskNoticeFirstMs ?? 60 * 1000;
+    this.longTaskNoticeIntervalMs = options.longTaskNoticeIntervalMs ?? 3 * 60 * 1000;
     this.longTaskNoticeMaxCount = options.longTaskNoticeMaxCount ?? 5;
   }
 
@@ -311,12 +311,12 @@ export class ChatWorkloadQueue<TTask> {
     const runningDuration = formatDuration((now - progress.startedAt) / 1000);
     const idleDuration = formatDuration((now - progress.lastActivityAt) / 1000);
     const lines = [
-      '任务仍在运行：',
-      `- 已运行: ${runningDuration}`,
-      `- 最近无新进展: ${idleDuration}`,
+      '这条任务还在处理中，我会继续跟进：',
+      `- 已处理时长: ${runningDuration}`,
+      `- 距上次进展: ${idleDuration}`,
       `- 当前阶段: ${formatActivityPhase(progress.phase)}`,
-      `- 最近进展: ${progress.reason}`,
-      `- 当前排队: ${this.getChatQueueLength(progress.chatId)} 条`,
+      `- 最新进展: ${progress.reason}`,
+      `- 当前排队消息: ${this.getChatQueueLength(progress.chatId)} 条`,
     ];
 
     if (progress.method) {
@@ -325,6 +325,8 @@ export class ChatWorkloadQueue<TTask> {
     if (progress.turnId) {
       lines.push(`- Turn: ${progress.turnId.slice(0, 8)}...`);
     }
+
+    lines.push('- 可发送 /stat 查看详情，或发送 /stop 中断任务。');
 
     return lines.join('\n');
   }

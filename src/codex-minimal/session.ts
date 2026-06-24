@@ -1,4 +1,10 @@
 import { CodexAppServerSpawnTarget } from '../codex/launch';
+import {
+  cloneAgentRuntimeStatus,
+  createAgentRuntimeStatus,
+  type AgentRuntimePhase,
+  type AgentRuntimeStatus,
+} from '../agent/runtime-status';
 import type { ActivityEvent, OnActivityCallback } from '../agent/types';
 import logger from '../utils/logger';
 import { CodexAppServerProcess, CodexAppServerProcessExit } from './app-server-process';
@@ -73,6 +79,10 @@ export class CodexMinimalSession {
   private inFlightPromise: Promise<SendMessageResult> | null = null;
   private startupPromise: Promise<void> | null = null;
   private closePromise: Promise<void> | null = null;
+  private runtimeStatus = createAgentRuntimeStatus({
+    phase: 'idle',
+    detail: '等待新任务',
+  });
 
   constructor(options: CodexMinimalSessionOptions) {
     this.workingDirectory = options.workingDirectory;
@@ -141,6 +151,7 @@ export class CodexMinimalSession {
     if (this.activeTurn) {
       this.activeTurn.interruptRequested = true;
     }
+    this.setRuntimeStatus('已发送中断请求，等待 Codex 停止', 'interrupting', true);
 
     const threadId = this.threadId;
     const turnId = this.activeTurnId;
@@ -160,6 +171,10 @@ export class CodexMinimalSession {
 
   isRunning(): boolean {
     return this.inFlightPromise !== null;
+  }
+
+  getRuntimeStatus(): AgentRuntimeStatus {
+    return cloneAgentRuntimeStatus(this.runtimeStatus);
   }
 
   getThreadId(): string | null {
@@ -185,6 +200,7 @@ export class CodexMinimalSession {
     }
 
     this.state = 'closing';
+    this.setRuntimeStatus('正在关闭 Codex 会话', this.activeTurn ? 'interrupting' : 'idle', !!this.activeTurn);
     const process = this.appServerProcess;
 
     if (!process) {
@@ -224,6 +240,7 @@ export class CodexMinimalSession {
     this.state = 'turn-active';
     const input = buildThreadInput(text, options?.imagePaths);
 
+    this.markActivity('Codex 正在接收本轮输入', options?.onActivity, 'running', true);
     notifyActivity(options?.onActivity, {
       phase: 'turn_starting',
       reason: 'sending turn/start',
@@ -305,6 +322,7 @@ export class CodexMinimalSession {
           maxAttempts: MAX_START_RETRIES + 1,
           error: lastError,
         });
+        this.setRuntimeStatus(lastError.message, 'error', false);
         await this.resetTransportAfterStartupFailure();
 
         if (attempt >= MAX_START_RETRIES) {
@@ -320,6 +338,7 @@ export class CodexMinimalSession {
 
   private async startOnce(attempt: number): Promise<void> {
     this.state = 'starting';
+    this.setRuntimeStatus('正在启动 Codex app-server', 'initializing', false);
     const appServerProcess = new CodexAppServerProcess({
       cwd: this.workingDirectory,
       spawnTarget: resolveSpawnTarget(this.codexPathOverride, this.codexArgsPrefix),
@@ -394,6 +413,7 @@ export class CodexMinimalSession {
 
     this.threadId = threadId;
     this.state = 'ready';
+    this.setRuntimeStatus('Codex 会话已就绪，等待新任务', 'idle', false);
     notifyActivity(this.activeTurn?.onActivity, {
       phase: 'ready',
       reason: this.resumeSessionId ? 'thread resumed' : 'thread started',
@@ -434,6 +454,7 @@ export class CodexMinimalSession {
 
     if (this.state !== 'broken') {
       this.state = 'cold';
+      this.setRuntimeStatus('等待重新建立 Codex 会话', 'idle', false);
     }
   }
 
@@ -464,6 +485,7 @@ export class CodexMinimalSession {
     }
 
     this.state = 'broken';
+    this.setRuntimeStatus(exitError.message, 'error', false);
 
     logger.error('[CodexMinimalSession] app-server exited and session is now broken', {
       workingDirectory: this.workingDirectory,
@@ -482,6 +504,14 @@ export class CodexMinimalSession {
     const method = message.method;
     const params = isObjectRecord(message.params) ? message.params : {};
 
+    if (method === 'turn/started' && this.threadId && isCurrentThreadNotification(params, this.threadId)) {
+      const turnId = extractTurnId(params) ?? this.rpcClient?.getTurnId() ?? null;
+      this.activeTurnId = turnId;
+      if (this.activeTurn) {
+        this.activeTurn.turnId = turnId;
+      }
+    }
+
     if (this.activeTurn && isCurrentThreadActivity(method, params, this.threadId)) {
       notifyActivity(this.activeTurn.onActivity, {
         phase: getActivityPhaseForMethod(method),
@@ -490,6 +520,9 @@ export class CodexMinimalSession {
         threadId: this.threadId,
         turnId: extractTurnId(params) ?? this.activeTurn.turnId,
       });
+
+      const { detail, phase } = describeCodexRuntimeNotification(method, params);
+      this.markActivity(detail, this.activeTurn.onActivity, phase, true);
     }
 
     if (!this.threadId || !isCurrentThreadNotification(params, this.threadId)) {
@@ -497,11 +530,6 @@ export class CodexMinimalSession {
     }
 
     if (method === 'turn/started') {
-      const turnId = extractTurnId(params) ?? this.rpcClient?.getTurnId() ?? null;
-      this.activeTurnId = turnId;
-      if (this.activeTurn) {
-        this.activeTurn.turnId = turnId;
-      }
       return;
     }
 
@@ -529,20 +557,25 @@ export class CodexMinimalSession {
       null;
 
     if (this.activeTurn.interruptRequested && isAbortedTurnStatus(turnStatus)) {
+      this.setRuntimeStatus('Codex 当前任务已中断', 'interrupted', false, true);
       this.rejectTurn(this.activeTurn, new TurnAbortedError());
       return;
     }
 
     if (turnError) {
+      this.setRuntimeStatus(turnError, 'error', false);
       this.rejectTurn(this.activeTurn, new Error(turnError));
       return;
     }
 
     if (turnStatus !== 'completed') {
-      this.rejectTurn(this.activeTurn, new Error(`Codex turn ended with status ${turnStatus ?? 'unknown'}.`));
+      const error = new Error(`Codex turn ended with status ${turnStatus ?? 'unknown'}.`);
+      this.setRuntimeStatus(error.message, 'error', false);
+      this.rejectTurn(this.activeTurn, error);
       return;
     }
 
+    this.setRuntimeStatus('Codex 本轮已完成，等待消息发送收尾', 'idle', false, true);
     this.resolveTurn(this.activeTurn, {
       text: this.activeTurn.finalAgentMessage ?? '',
       threadId: this.threadId,
@@ -599,6 +632,47 @@ export class CodexMinimalSession {
 
     return this.developerInstructions;
   }
+
+  private setRuntimeStatus(
+    detail: string,
+    phase: AgentRuntimePhase,
+    isTurnInProgress: boolean,
+    syncLastActivityAt = false,
+  ): void {
+    const now = Date.now();
+    this.runtimeStatus = {
+      ...this.runtimeStatus,
+      phase,
+      detail,
+      isTurnInProgress,
+      updatedAt: now,
+      lastActivityAt: syncLastActivityAt ? now : this.runtimeStatus.lastActivityAt,
+    };
+  }
+
+  private markActivity(
+    detail: string,
+    onActivity: OnActivityCallback | undefined,
+    phase: AgentRuntimePhase,
+    isTurnInProgress: boolean,
+  ): void {
+    const now = Date.now();
+    this.runtimeStatus = {
+      ...this.runtimeStatus,
+      phase,
+      detail,
+      isTurnInProgress,
+      updatedAt: now,
+      lastActivityAt: now,
+      activityCount: this.runtimeStatus.activityCount + 1,
+    };
+    notifyActivity(onActivity, {
+      phase: 'turn_running',
+      reason: detail,
+      threadId: this.threadId,
+      turnId: this.activeTurnId,
+    });
+  }
 }
 
 function notifyActivity(onActivity: OnActivityCallback | undefined, event: ActivityEvent): void {
@@ -652,6 +726,82 @@ function describeActivity(method: string, params: Record<string, unknown>): stri
   }
 
   return method;
+}
+
+function describeCodexRuntimeNotification(
+  method: string,
+  params: Record<string, unknown>,
+): { detail: string; phase: AgentRuntimePhase } {
+  if (method === 'turn/started') {
+    return {
+      detail: 'Codex 已开始处理当前轮次',
+      phase: 'running',
+    };
+  }
+
+  if (method === 'turn/completed') {
+    return {
+      detail: 'Codex 已完成本轮处理，正在收尾',
+      phase: 'running',
+    };
+  }
+
+  if (method === 'item/started' || method === 'item/completed') {
+    return describeCodexRuntimeItem(params.item, method === 'item/started');
+  }
+
+  return {
+    detail: `Codex 事件更新: ${method}`,
+    phase: 'running',
+  };
+}
+
+function describeCodexRuntimeItem(item: unknown, started: boolean): { detail: string; phase: AgentRuntimePhase } {
+  if (!item || typeof item !== 'object') {
+    return {
+      detail: started ? 'Codex 正在处理子步骤' : 'Codex 已完成一个子步骤',
+      phase: 'running',
+    };
+  }
+
+  const record = item as Record<string, unknown>;
+  const itemType = typeof record.type === 'string' ? record.type : 'unknown';
+  const itemName = typeof record.name === 'string' ? record.name : '';
+
+  if (itemType === 'reasoning') {
+    return {
+      detail: started ? 'Codex 正在思考' : 'Codex 思考步骤已更新',
+      phase: 'running',
+    };
+  }
+
+  if (itemType === 'agentMessage') {
+    return {
+      detail: started ? 'Codex 正在生成回复' : 'Codex 回复内容已更新',
+      phase: 'running',
+    };
+  }
+
+  if (itemType === 'function_call') {
+    return {
+      detail: started
+        ? `Codex 正在调用工具 ${itemName || 'unknown'}`
+        : `工具 ${itemName || 'unknown'} 已返回，等待 Codex 继续`,
+      phase: started ? 'waiting' : 'running',
+    };
+  }
+
+  if (itemType === 'function_call_output') {
+    return {
+      detail: '工具输出已返回，等待 Codex 继续处理',
+      phase: 'running',
+    };
+  }
+
+  return {
+    detail: started ? `Codex 正在处理 ${itemType}` : `Codex 已完成 ${itemType}`,
+    phase: 'running',
+  };
 }
 
 function buildThreadInput(text: string, imagePaths?: string[]): TurnInputItem[] {

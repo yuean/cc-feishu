@@ -1,10 +1,11 @@
-﻿import { existsSync } from 'fs';
-import { mkdirSync } from 'fs';
+import { existsSync, mkdirSync } from 'fs';
 
-import logger from '../utils/logger';
+import { formatAgentRuntimePhase } from '../agent/runtime-status';
+import type { ActivityEvent } from '../agent/types';
 import { chatManager } from '../bot/chat-manager';
 import { resolveChatAccess } from '../bot/chat-access';
 import { chatBindingStore } from '../bot/chat-binding-store';
+import { ChatWorkloadQueue } from '../bot/chat-workload-queue';
 import { deriveChatDirectoryName } from '../bot/directory-name';
 import menuContext from '../bot/menu-context';
 import {
@@ -13,12 +14,11 @@ import {
   handleMessageCommand,
   logLongProcessing,
 } from '../bot/message-command-router';
-import { ChatWorkloadQueue } from '../bot/chat-workload-queue';
 import { isDirectoryAvailable, resolveWorkPathCandidate } from '../bot/work-directory';
-import type { ActivityEvent } from '../agent/types';
+import config from '../config';
 import chatService from '../services/chat.service';
 import messageService from '../services/message.service';
-import config from '../config';
+import logger from '../utils/logger';
 import {
   parseMessageTask,
   type MessageEvent,
@@ -32,7 +32,7 @@ import {
 const processedMessages = new Set<string>();
 const MAX_CACHE_SIZE = 500;
 let acceptingMessages = true;
-const MESSAGE_IDLE_TIMEOUT_MS = 300000;
+const MESSAGE_IDLE_TIMEOUT_MS = readPositiveIntegerEnv('MESSAGE_IDLE_TIMEOUT_MS', 300000);
 
 interface MessageProcessingOptions {
   onActivity?: (event?: ActivityEvent) => void;
@@ -62,6 +62,17 @@ function getUnauthorizedText(openId: string): string {
   return `当前账号无权限使用这个机器人。\n你的 open_id: ${openId}\n如需授权，请将它加入 FEISHU_ALLOWED_OPEN_IDS。`;
 }
 
+function getIdentityText(data: MessageEvent): string {
+  const { sender, message } = data;
+  return [
+    '当前身份信息:',
+    `open_id: ${sender.sender_id.open_id}`,
+    `chat_id: ${message.chat_id}`,
+    `chat_type: ${message.chat_type ?? 'unknown'}`,
+    `message_type: ${message.message_type}`,
+  ].join('\n');
+}
+
 function getUnboundText(): string {
   return '当前群尚未绑定工作目录，请先使用 /cd <路径> 绑定。';
 }
@@ -73,6 +84,10 @@ function getResetInvalidBindingText(cwd: string, droppedCount: number): string {
 
 function isDirectChat(chatType: string | undefined): boolean {
   return chatType === 'p2p' || chatType === 'p2p_chat';
+}
+
+function isIdentityCommand(text: string): boolean {
+  return text === '/whoami' || text === '/openid' || text === '/open_id';
 }
 
 function buildAutoBindMessage(
@@ -100,6 +115,28 @@ function buildAutoBindMessage(
   }
 
   return lines.join('\n');
+}
+
+function formatTimeoutStatus(chatId: string): string[] {
+  const runtimeStatus = chatManager.getRuntimeStatus(chatId);
+  if (!runtimeStatus) {
+    return [
+      '当前状态: 未发现活跃 agent',
+      '状态说明: 当前请求可能卡在 agent 之外的收尾流程',
+      '执行判断: 当前没有可确认的执行中任务',
+    ];
+  }
+
+  const lastActivity = runtimeStatus.lastActivityAt
+    ? `${formatDuration((Date.now() - runtimeStatus.lastActivityAt) / 1000)}前`
+    : '暂无活动记录';
+
+  return [
+    `当前状态: ${formatAgentRuntimePhase(runtimeStatus.phase)}`,
+    `状态说明: ${runtimeStatus.detail}`,
+    `最近活动: ${lastActivity}`,
+    `执行判断: ${runtimeStatus.isTurnInProgress ? '仍有任务在执行或等待' : '当前没有执行中的任务'}`,
+  ];
 }
 
 async function autoBindGroupDirectory(chatId: string): Promise<{ bound: boolean; notified: boolean }> {
@@ -189,6 +226,11 @@ async function prepareMessageTask(data: MessageEvent): Promise<void> {
   }
 
   rememberProcessedMessage(message.message_id);
+
+  if (parsedTask.messageType === 'text' && isIdentityCommand(parsedTask.text)) {
+    await messageService.sendTextMessage(chatId, getIdentityText(data));
+    return;
+  }
 
   let binding = chatBindingStore.get(chatId);
   let bindingValid = !binding || isDirectoryAvailable(binding.cwd);
@@ -354,6 +396,25 @@ function rememberProcessedMessage(messageId: string): void {
   }
 }
 
+function readPositiveIntegerEnv(name: string, defaultValue: number): number {
+  const rawValue = process.env[name];
+  if (!rawValue) {
+    return defaultValue;
+  }
+
+  const parsed = Number(rawValue);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    logger.warn('Invalid numeric env value, using default', {
+      name,
+      rawValue,
+      defaultValue,
+    });
+    return defaultValue;
+  }
+
+  return Math.floor(parsed);
+}
+
 async function handleQueuedWorkload(
   task: QueuedMessageTask,
   startTime: number,
@@ -373,6 +434,8 @@ async function handleQueuedWorkload(
     imageCount: task.imagePaths?.length ?? 0,
   });
 
+  return await handleQueuedWorkloadWithIdleWatchdog(task, startTime, options);
+
   const result = await handleMessageCommand({ ...task, message }, {
     getActiveTaskStatus: chatId => workloadQueue.getActiveTaskStatus(chatId),
     onActivity: options?.onActivity,
@@ -386,5 +449,139 @@ async function handleQueuedWorkload(
       duration,
       threshold: MESSAGE_IDLE_TIMEOUT_MS * 0.5,
     });
+
+    const statusLines = formatTimeoutStatus(chatId);
+    await messageService.sendTextMessage(
+      chatId,
+      [
+        `消息处理超过 ${Math.round(MESSAGE_IDLE_TIMEOUT_MS / 1000)} 秒未观察到新进展，当前不会自动终止会话。`,
+        ...statusLines,
+        '后续消息会继续排队。',
+        '可发送 /stat 查看详细状态；如果确认已经空闲，再考虑使用 /stop 或 /new。',
+      ].join('\n'),
+    ).catch(error => {
+      logger.error('Failed to send timeout notification', { error });
+    });
   }
+}
+
+async function handleQueuedWorkloadWithIdleWatchdog(
+  task: QueuedMessageTask,
+  startTime: number,
+  options?: MessageProcessingOptions,
+): Promise<void> {
+  const { data } = task;
+  const { message } = data;
+  const chatId = message.chat_id;
+  let timeoutTimer: ReturnType<typeof setTimeout> | undefined;
+  let watchdogSettled = false;
+  let lastActivityAt = startTime;
+  let activityCount = 0;
+  let resolveTimeout: ((result: 'timeout') => void) | null = null;
+
+  const clearWatchdog = () => {
+    if (!timeoutTimer) {
+      return;
+    }
+
+    clearTimeout(timeoutTimer);
+    timeoutTimer = undefined;
+  };
+
+  const scheduleTimeout = () => {
+    if (watchdogSettled) {
+      return;
+    }
+
+    clearWatchdog();
+    timeoutTimer = setTimeout(() => {
+      watchdogSettled = true;
+      resolveTimeout?.('timeout');
+    }, MESSAGE_IDLE_TIMEOUT_MS);
+
+    if (typeof (timeoutTimer as { unref?: () => unknown }).unref === 'function') {
+      (timeoutTimer as { unref: () => unknown }).unref();
+    }
+  };
+
+  const markActivity = (event?: ActivityEvent) => {
+    lastActivityAt = Date.now();
+    activityCount += 1;
+    options?.onActivity?.(event);
+    scheduleTimeout();
+  };
+
+  const processingPromise = handleMessageCommand({ ...task, message }, {
+    getActiveTaskStatus: currentChatId => workloadQueue.getActiveTaskStatus(currentChatId),
+    onActivity: markActivity,
+  }).finally(() => {
+    watchdogSettled = true;
+    clearWatchdog();
+  });
+
+  const timeoutPromise = new Promise<'timeout'>((resolve) => {
+    resolveTimeout = resolve;
+    scheduleTimeout();
+  });
+
+  const outcome: { kind: 'completed' } | { kind: 'timeout' } = await Promise.race([
+    processingPromise.then(() => ({ kind: 'completed' as const })),
+    timeoutPromise.then(() => ({ kind: 'timeout' as const })),
+  ]);
+
+  if (outcome.kind === 'completed') {
+    return;
+  }
+
+  const duration = Date.now() - startTime;
+  const idleDuration = Date.now() - lastActivityAt;
+  logger.error('Message processing idle timeout', {
+    messageId: message.message_id,
+    chatId,
+    duration,
+    idleDuration,
+    timeout: MESSAGE_IDLE_TIMEOUT_MS,
+    activityCount,
+  });
+
+  const statusLines = formatTimeoutStatus(chatId);
+  await messageService.sendTextMessage(
+    chatId,
+    [
+      `消息处理超过 ${Math.round(MESSAGE_IDLE_TIMEOUT_MS / 1000)} 秒未观察到新进展，当前不会自动终止会话。`,
+      ...statusLines,
+      '后续消息会继续排队。',
+      '可发送 /stat 查看详细状态；如果确认已经空闲，再考虑使用 /stop 或 /new。',
+    ].join('\n'),
+  ).catch(error => {
+    logger.error('Failed to send timeout notification', { error });
+  });
+
+  await processingPromise.catch(error => {
+    logger.warn('Queued message finished after idle timeout', {
+      messageId: message.message_id,
+      chatId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  });
+}
+
+function formatDuration(seconds: number): string {
+  const wholeSeconds = Math.max(0, Math.floor(seconds));
+  if (wholeSeconds < 60) {
+    return `${wholeSeconds}秒`;
+  }
+  if (wholeSeconds < 3600) {
+    const minutes = Math.floor(wholeSeconds / 60);
+    const secs = wholeSeconds % 60;
+    return `${minutes}分${secs}秒`;
+  }
+  if (wholeSeconds < 86400) {
+    const hours = Math.floor(wholeSeconds / 3600);
+    const minutes = Math.floor((wholeSeconds % 3600) / 60);
+    return `${hours}小时${minutes}分`;
+  }
+  const days = Math.floor(wholeSeconds / 86400);
+  const hours = Math.floor((wholeSeconds % 86400) / 3600);
+  return `${days}天${hours}小时`;
 }

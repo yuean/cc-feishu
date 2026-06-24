@@ -7,6 +7,7 @@ process.env.FEISHU_APP_ID = process.env.FEISHU_APP_ID || 'test-app-id';
 process.env.FEISHU_APP_SECRET = process.env.FEISHU_APP_SECRET || 'test-app-secret';
 
 import type { CreateAgentOptions } from '../src/agent/factory';
+import { createAgentRuntimeStatus } from '../src/agent/runtime-status';
 
 function writeSession(
   sessionsDir: string,
@@ -63,6 +64,11 @@ function createFakeAgent() {
     onResponse: () => undefined,
     onError: () => undefined,
     getStartTime: () => Date.now(),
+    getRuntimeStatus: () => createAgentRuntimeStatus({
+      phase: 'idle',
+      detail: 'synthetic idle',
+      lastActivityAt: Date.now(),
+    }),
   };
 }
 

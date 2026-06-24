@@ -85,11 +85,12 @@ async function runLongRunningNoticeTest(): Promise<void> {
   });
 
   await waitFor(() => notices.length === 1, 'first long-running notice');
-  assert.match(notices[0], /任务仍在运行/);
+  assert.match(notices[0], /这条任务还在处理中，我会继续跟进/);
   assert.match(notices[0], /当前阶段: turn 运行中/);
-  assert.match(notices[0], /最近进展: processing 长任务/);
+  assert.match(notices[0], /最新进展: processing 长任务/);
   assert.match(notices[0], /最近事件: item\/completed/);
   assert.match(notices[0], /Turn: turn-lon/);
+  assert.match(notices[0], /可发送 \/stat 查看详情，或发送 \/stop 中断任务/);
 
   await waitFor(() => notices.length === 2, 'second long-running notice');
   await delay(60);

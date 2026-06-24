@@ -26,7 +26,7 @@ async function main(): Promise<void> {
   const originalSendCardMessage = messageService.sendCardMessage.bind(messageService);
   const originalAddReaction = messageService.addReaction.bind(messageService);
   const originalRemoveReaction = messageService.removeReaction.bind(messageService);
-  const originalGetSessionInfo = chatManager.getSessionInfo.bind(chatManager);
+  const originalGetDetailedSessionInfo = chatManager.getDetailedSessionInfo.bind(chatManager);
   const originalSendMessage = chatManager.sendMessage.bind(chatManager);
 
   try {
@@ -45,7 +45,7 @@ async function main(): Promise<void> {
     messageService.removeReaction = (async (_messageId: string, reactionId: string) => {
       removedReactions.push(reactionId);
     }) as typeof messageService.removeReaction;
-    chatManager.getSessionInfo = (() => '当前没有活跃会话\nProvider: codex\n工作目录: C:\\work') as typeof chatManager.getSessionInfo;
+    chatManager.getDetailedSessionInfo = (() => '当前没有活跃会话\nProvider: codex\n工作目录: C:\\work') as typeof chatManager.getDetailedSessionInfo;
     chatManager.sendMessage = (async (_chatId: string, text: string) => {
       sentPrompts.push(text);
     }) as typeof chatManager.sendMessage;
@@ -84,7 +84,7 @@ async function main(): Promise<void> {
     messageService.sendCardMessage = originalSendCardMessage as typeof messageService.sendCardMessage;
     messageService.addReaction = originalAddReaction as typeof messageService.addReaction;
     messageService.removeReaction = originalRemoveReaction as typeof messageService.removeReaction;
-    chatManager.getSessionInfo = originalGetSessionInfo as typeof chatManager.getSessionInfo;
+    chatManager.getDetailedSessionInfo = originalGetDetailedSessionInfo as typeof chatManager.getDetailedSessionInfo;
     chatManager.sendMessage = originalSendMessage as typeof chatManager.sendMessage;
   }
 }

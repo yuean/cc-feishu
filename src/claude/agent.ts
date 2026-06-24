@@ -1,4 +1,5 @@
-﻿import logger from '../utils/logger';
+import logger from '../utils/logger';
+import type { AgentRuntimeStatus } from '../agent/runtime-status';
 import type { ChatAgent, OnErrorCallback, OnResponseCallback, SendMessageOptions } from '../agent/types';
 import { CLILauncher } from './launcher';
 import { CLIBridge } from './bridge';
@@ -94,7 +95,9 @@ export class Agent implements ChatAgent {
       await this.destroy(err as Error);
       throw err;
     }
-    await this.bridge.sendUserMessage(text, options?.onComplete);
+
+    options?.onActivity?.();
+    await this.bridge.sendUserMessage(text, options?.onComplete, () => options?.onActivity?.());
   }
 
   interrupt(): boolean {
@@ -176,10 +179,11 @@ export class Agent implements ChatAgent {
     return this.startTime;
   }
 
+  getRuntimeStatus(): AgentRuntimeStatus {
+    return this.bridge.getRuntimeStatus();
+  }
+
   getPid(): number | undefined {
     return this.launcher.getProcess()?.pid;
   }
 }
-
-
-

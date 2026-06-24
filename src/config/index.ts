@@ -161,8 +161,8 @@ const config: Config = {
     workRoot: resolveAgentWorkRoot(),
     idleTtlMs: parsePositiveInt('AGENT_IDLE_TTL_MS', 4 * 60 * 60 * 1000),
     sessionDayCutoffHour: parseHour('AGENT_SESSION_DAY_CUTOFF_HOUR', 5),
-    longTaskNoticeFirstMs: parsePositiveInt('AGENT_LONG_TASK_NOTICE_FIRST_MS', 30 * 1000),
-    longTaskNoticeIntervalMs: parsePositiveInt('AGENT_LONG_TASK_NOTICE_INTERVAL_MS', 60 * 1000),
+    longTaskNoticeFirstMs: parsePositiveInt('AGENT_LONG_TASK_NOTICE_FIRST_MS', 60 * 1000),
+    longTaskNoticeIntervalMs: parsePositiveInt('AGENT_LONG_TASK_NOTICE_INTERVAL_MS', 3 * 60 * 1000),
     longTaskNoticeMaxCount: parsePositiveInt('AGENT_LONG_TASK_NOTICE_MAX_COUNT', 5),
   },
   claude: {

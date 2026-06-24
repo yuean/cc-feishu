@@ -16,6 +16,11 @@ if (testFiles.length === 0) {
 
 for (const file of testFiles) {
   const testPath = join(testsDir, file);
+  const childEnv = {
+    ...process.env,
+    FEISHU_APP_ID: process.env.FEISHU_APP_ID || 'test-app-id',
+    FEISHU_APP_SECRET: process.env.FEISHU_APP_SECRET || 'test-app-secret',
+  };
   console.log(`\n> ${file}`);
 
   const result = spawnSync(
@@ -23,7 +28,7 @@ for (const file of testFiles) {
     ['-r', 'ts-node/register', testPath],
     {
       cwd: join(testsDir, '..'),
-      env: process.env,
+      env: childEnv,
       stdio: 'inherit',
     },
   );

@@ -1,3 +1,4 @@
+import type { AgentRuntimeStatus } from './runtime-status';
 export type OnResponseCallback = (text: string) => void;
 export type OnErrorCallback = (error: Error) => void;
 export type ActivityPhase =
@@ -39,4 +40,5 @@ export interface ChatAgent {
   onResponse(callback: OnResponseCallback): void;
   onError(callback: OnErrorCallback): void;
   getStartTime(): number;
+  getRuntimeStatus(): AgentRuntimeStatus;
 }

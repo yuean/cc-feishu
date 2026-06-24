@@ -344,8 +344,8 @@ export async function handleMessageCommand(
 
     const activeTaskStatus = options.getActiveTaskStatus(chatId);
     const info = activeTaskStatus
-      ? `${chatManager.getSessionInfo(chatId)}${activeTaskStatus}`
-      : chatManager.getSessionInfo(chatId);
+      ? `${chatManager.getDetailedSessionInfo(chatId)}${activeTaskStatus}`
+      : chatManager.getDetailedSessionInfo(chatId);
     await messageService.sendTextMessage(chatId, info);
     return { kind: 'command' };
   }
@@ -356,7 +356,7 @@ export async function handleMessageCommand(
   }
 
   if (text === '/debug') {
-    const info = chatManager.getDebugInfo();
+    const info = chatManager.getDetailedDebugInfo();
     await messageService.sendCardMessage(chatId, info);
     return { kind: 'command' };
   }

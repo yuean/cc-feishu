@@ -5,6 +5,17 @@ import type { AgentProvider } from '../config';
 import type { ChatAgent, SendMessageOptions } from '../agent/types';
 import type { DirectorySummary, SessionSummary, SessionTarget } from '../agent/session-history';
 import {
+  cloneAgentRuntimeStatus,
+  createAgentRuntimeStatus,
+  formatAgentRuntimePhase,
+  type AgentRuntimeStatus,
+} from '../agent/runtime-status';
+import {
+  appendFeishuAttachmentInstructions,
+  hasFeishuAttachmentUploadProtocol,
+  parseFeishuResponse,
+} from './response-attachments';
+import {
   getRecentDirectories as getClaudeRecentDirectories,
   getSessionList as getClaudeSessionList,
   getValidSessions as getClaudeValidSessions,
@@ -69,9 +80,35 @@ function formatDuration(seconds: number): string {
   return `${days}天${hours}小时`;
 }
 
+function formatSessionId(sessionId: string | undefined, maxLength = 16): string {
+  if (!sessionId) {
+    return '无';
+  }
+
+  return sessionId.length > maxLength
+    ? `${sessionId.slice(0, maxLength)}...`
+    : sessionId;
+}
+
+function formatLastActivity(status: AgentRuntimeStatus): string {
+  if (!status.lastActivityAt) {
+    return '暂无活动记录';
+  }
+
+  return `${formatDuration((Date.now() - status.lastActivityAt) / 1000)}前`;
+}
+
+function formatRuntimeStatusSummary(status: AgentRuntimeStatus): string {
+  const phase = formatAgentRuntimePhase(status.phase);
+  const activity = formatLastActivity(status);
+  const workload = status.isTurnInProgress ? '仍有任务在执行或等待' : '当前没有执行中的任务';
+  return `${phase}｜${status.detail}｜最近活动 ${activity}｜${workload}`;
+}
+
 export class ChatManager {
   private chats = new Map<string, ChatData>();
   private agents = new Map<string, ChatAgent>();
+  private pendingResponseAttachments = new Map<string, boolean>();
   private readonly bindingStore: ChatBindingStore;
   private readonly defaultCwd: string;
   private readonly defaultProvider: AgentProvider;
@@ -119,15 +156,100 @@ export class ChatManager {
     return this.getChatCwd(chatId);
   }
 
+  getRuntimeStatus(chatId: string): AgentRuntimeStatus | null {
+    const agent = this.agents.get(chatId);
+    const runtimeStatus = agent?.getRuntimeStatus?.();
+    return runtimeStatus ? cloneAgentRuntimeStatus(runtimeStatus) : null;
+  }
+
+  getDetailedSessionInfo(chatId: string): string {
+    const agent = this.agents.get(chatId);
+    const data = this.chats.get(chatId);
+    const provider = data?.provider ?? this.defaultProvider;
+
+    if (!agent) {
+      const cwd = data?.cwd ?? this.getStoredCwd(chatId) ?? this.defaultCwd;
+      return [
+        '当前没有活跃会话',
+        `Provider: ${provider}`,
+        `工作目录: ${cwd}`,
+        '当前状态: 空闲',
+        '状态说明: 尚未创建 agent',
+      ].join('\n');
+    }
+
+    const runtimeStatus = this.getRuntimeStatus(chatId) ?? createAgentRuntimeStatus();
+    const uptime = (this.now() - agent.getStartTime()) / 1000;
+
+    return [
+      '会话信息:',
+      `- Provider: ${provider}`,
+      `- Session ID: ${formatSessionId(agent.getSessionId())}`,
+      `- 工作目录: ${agent.getCwd()}`,
+      `- 运行时长: ${formatDuration(uptime)}`,
+      `- 当前状态: ${formatAgentRuntimePhase(runtimeStatus.phase)}`,
+      `- 状态说明: ${runtimeStatus.detail}`,
+      `- 最近活动: ${formatLastActivity(runtimeStatus)}`,
+      `- 活动计数: ${runtimeStatus.activityCount}`,
+      `- 执行判断: ${runtimeStatus.isTurnInProgress ? '仍有任务在执行或等待' : '当前没有执行中的任务'}`,
+    ].join('\n');
+  }
+
+  getDetailedDebugInfo(): string {
+    const uptime = (this.now() - this.startTime) / 1000;
+    const info = [
+      '**系统状态**',
+      `- 默认 Provider: ${this.defaultProvider}`,
+      `- 运行时长: ${formatDuration(uptime)}`,
+      `- 活跃会话: ${this.chats.size}`,
+      `- 活跃 Agent: ${this.agents.size}`,
+      '',
+      '**会话列表**',
+    ];
+
+    if (this.chats.size === 0) {
+      info.push('当前没有活跃会话');
+      return info.join('\n');
+    }
+
+    for (const [chatId, data] of this.chats) {
+      const agent = this.agents.get(chatId);
+      const lines = [
+        `- Chat: \`${chatId.slice(0, 8)}...\``,
+        `  - Provider: ${data.provider}`,
+        `  - Session: \`${formatSessionId(data.sessionId, 8)}\``,
+        `  - CWD: \`${data.cwd}\``,
+      ];
+
+      if (!agent) {
+        lines.push('  - Agent: 未启动');
+      } else {
+        const agentId = agent.getAgentId();
+        const agentIdShort = agentId.length > 12 ? `${agentId.slice(0, 12)}...` : agentId;
+        const runtimeStatus = this.getRuntimeStatus(chatId) ?? createAgentRuntimeStatus();
+        lines.push(`  - Agent: \`${agentIdShort}\``);
+        lines.push(`  - Status: ${formatRuntimeStatusSummary(runtimeStatus)}`);
+      }
+
+      info.push(lines.join('\n'));
+    }
+
+    return info.join('\n');
+  }
+
   supportsSessionResume(chatId: string): boolean {
     const provider = this.getChatProvider(chatId);
     return provider === 'claude' || provider === 'codex';
   }
 
   async sendMessage(chatId: string, text: string, options?: SendMessageOptions): Promise<void> {
-    const sessionDecision = await this.applySessionDecision(chatId, text);
+    const preparedText = appendFeishuAttachmentInstructions(text);
+    const sessionDecision = await this.applySessionDecision(chatId, preparedText);
     const provider = this.getChatProvider(chatId);
     const agent = this.getOrCreateAgent(chatId);
+    const allowResponseAttachments = hasFeishuAttachmentUploadProtocol(preparedText);
+
+    this.pendingResponseAttachments.set(chatId, allowResponseAttachments);
     this.cancelIdleTimer(chatId);
     this.touchChat(chatId, agent);
     logger.info('[ChatManager] Sending message', {
@@ -136,11 +258,15 @@ export class ChatManager {
       agentId: agent.getAgentId(),
       sessionId: agent.getSessionId(),
       sessionDecision,
-      messageLength: text.length,
-      messageText: text,
+      messageLength: preparedText.length,
+      messageText: preparedText,
+      attachmentUploadsEnabled: allowResponseAttachments,
     });
     try {
-      await agent.sendMessage(text, options);
+      await agent.sendMessage(preparedText, options);
+    } catch (error) {
+      this.pendingResponseAttachments.delete(chatId);
+      throw error;
     } finally {
       this.touchChat(chatId, agent);
       this.scheduleIdleReclaim(chatId, agent);
@@ -518,6 +644,8 @@ export class ChatManager {
     const expectedSessionId = resumeSessionId ?? agent.getSessionId();
 
     agent.onResponse((text) => {
+      const allowResponseAttachments = this.pendingResponseAttachments.get(chatId) ?? false;
+      this.pendingResponseAttachments.delete(chatId);
       const currentData = this.chats.get(chatId);
 
       if (currentData && !currentData.sessionNotified) {
@@ -552,11 +680,15 @@ export class ChatManager {
         agentId: agent.getAgentId(),
         textLength: text.length,
         responseText: text,
+        attachmentUploadsEnabled: allowResponseAttachments,
       });
-      this.sendResponse(chatId, text);
+      this.sendResponse(chatId, text, allowResponseAttachments).catch(error => {
+        logger.error('[ChatManager] Failed to send response', { chatId, error });
+      });
     });
 
     agent.onError((error) => {
+      this.pendingResponseAttachments.delete(chatId);
       logger.error('[ChatManager] Agent error', { chatId, provider, error: error.message });
       messageService.sendTextMessage(chatId, `错误: ${error.message}`).catch(() => {});
     });
@@ -612,20 +744,62 @@ export class ChatManager {
     return `**${index}.** \`${session.sessionId.slice(0, 8)}...\`${marker}  ${age}前`;
   }
 
-  private sendResponse(chatId: string, text: string): void {
+  private async sendResponse(chatId: string, text: string, allowAttachments = false): Promise<void> {
+    const parsed = allowAttachments
+      ? parseFeishuResponse(text, this.getChatCwd(chatId))
+      : { text, attachments: [] };
+
+    if (parsed.text) {
+      await this.sendTextResponse(chatId, parsed.text);
+    }
+
+    const uploadErrors: string[] = [];
+    for (const attachment of parsed.attachments) {
+      try {
+        if (attachment.kind === 'image') {
+          try {
+            await messageService.sendImageMessage(chatId, attachment.resolvedPath);
+          } catch (imageError) {
+            logger.warn('[ChatManager] Falling back to file upload for image attachment', {
+              chatId,
+              originalPath: attachment.originalPath,
+              resolvedPath: attachment.resolvedPath,
+              error: imageError instanceof Error ? imageError.message : String(imageError),
+            });
+            await messageService.sendFileMessage(chatId, attachment.resolvedPath);
+          }
+        } else {
+          await messageService.sendFileMessage(chatId, attachment.resolvedPath);
+        }
+      } catch (error) {
+        logger.error('[ChatManager] Failed to send attachment', {
+          chatId,
+          kind: attachment.kind,
+          originalPath: attachment.originalPath,
+          resolvedPath: attachment.resolvedPath,
+          error,
+        });
+        uploadErrors.push(`${attachment.originalPath}: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+
+    if (uploadErrors.length > 0) {
+      await messageService.sendTextMessage(
+        chatId,
+        `以下附件回传失败：\n${uploadErrors.join('\n')}`,
+      );
+    }
+  }
+
+  private async sendTextResponse(chatId: string, text: string): Promise<void> {
     const maxLen = 4000;
     if (text.length <= maxLen) {
-      messageService.sendCardMessage(chatId, text).then(() => {
-        logger.debug('[ChatManager] Response sent', { chatId, textLength: text.length });
-      }).catch(err => {
-        logger.error('[ChatManager] Failed to send response', { chatId, error: err.message });
-      });
+      await messageService.sendCardMessage(chatId, text);
+      logger.debug('[ChatManager] Response sent', { chatId, textLength: text.length });
       return;
     }
 
-    this.sendLongMessage(chatId, text, maxLen).catch(err => {
-      logger.error('[ChatManager] Failed to send long response', { chatId, error: err.message });
-    });
+    await this.sendLongMessage(chatId, text, maxLen);
   }
 
   private async sendLongMessage(chatId: string, text: string, maxLen: number): Promise<void> {
@@ -641,6 +815,7 @@ export class ChatManager {
 
   private async destroyAgent(chatId: string, reason: string): Promise<void> {
     this.cancelIdleTimer(chatId);
+    this.pendingResponseAttachments.delete(chatId);
     const agent = this.agents.get(chatId);
     if (!agent) {
       return;

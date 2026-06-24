@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 process.env.FEISHU_APP_ID = process.env.FEISHU_APP_ID || 'test-app-id';
 process.env.FEISHU_APP_SECRET = process.env.FEISHU_APP_SECRET || 'test-app-secret';
 
+import { createAgentRuntimeStatus } from '../src/agent/runtime-status';
 import type { ChatAgent, OnErrorCallback, OnResponseCallback, SendMessageOptions } from '../src/agent/types';
 import type { CreateAgentOptions } from '../src/agent/factory';
 
@@ -67,6 +68,14 @@ class FakeAgent implements ChatAgent {
 
   getStartTime(): number {
     return this.now();
+  }
+
+  getRuntimeStatus() {
+    return createAgentRuntimeStatus({
+      phase: 'idle',
+      detail: 'synthetic idle',
+      lastActivityAt: this.now(),
+    });
   }
 }
 

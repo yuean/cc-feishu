@@ -1,4 +1,5 @@
 import logger from '../utils/logger';
+import type { AgentRuntimeStatus } from '../agent/runtime-status';
 import type { ChatAgent, OnErrorCallback, OnResponseCallback, SendMessageOptions } from '../agent/types';
 import {
   CodexMinimalSession,
@@ -197,5 +198,9 @@ export class CodexAgent implements ChatAgent {
 
   getStartTime(): number {
     return this.startTime;
+  }
+
+  getRuntimeStatus(): AgentRuntimeStatus {
+    return this.session.getRuntimeStatus();
   }
 }

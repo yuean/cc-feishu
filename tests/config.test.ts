@@ -52,11 +52,17 @@ async function main(): Promise<void> {
         CHAT_BINDINGS_FILE: undefined,
         AGENT_IDLE_TTL_MS: undefined,
         AGENT_SESSION_DAY_CUTOFF_HOUR: undefined,
+        AGENT_LONG_TASK_NOTICE_FIRST_MS: undefined,
+        AGENT_LONG_TASK_NOTICE_INTERVAL_MS: undefined,
+        AGENT_LONG_TASK_NOTICE_MAX_COUNT: undefined,
       }, () => {
         const config = loadConfig();
         assert.equal((config as any).agent.workRoot, 'C:\\work\\preferred-root');
         assert.equal((config as any).agent.idleTtlMs, 4 * 60 * 60 * 1000);
         assert.equal((config as any).agent.sessionDayCutoffHour, 5);
+        assert.equal((config as any).agent.longTaskNoticeFirstMs, 60 * 1000);
+        assert.equal((config as any).agent.longTaskNoticeIntervalMs, 3 * 60 * 1000);
+        assert.equal((config as any).agent.longTaskNoticeMaxCount, 5);
         assert.match((config as any).codex.developerInstructions, /飞书 Bot/);
       });
 

@@ -307,28 +307,46 @@ export class ChatWorkloadQueue<TTask> {
   }
 
   private formatLongTaskNotice(progress: ActiveTaskProgress): string {
-    const now = Date.now();
-    const runningDuration = formatDuration((now - progress.startedAt) / 1000);
-    const idleDuration = formatDuration((now - progress.lastActivityAt) / 1000);
+    const runningDuration = formatDuration((Date.now() - progress.startedAt) / 1000);
     const lines = [
       '这条任务还在处理中，我会继续跟进：',
       `- 已处理时长: ${runningDuration}`,
-      `- 距上次进展: ${idleDuration}`,
-      `- 当前阶段: ${formatActivityPhase(progress.phase)}`,
-      `- 最新进展: ${progress.reason}`,
-      `- 当前排队消息: ${this.getChatQueueLength(progress.chatId)} 条`,
+      `- 当前阶段: ${formatActivityPhaseForNotice(progress.phase)}`,
     ];
 
-    if (progress.method) {
-      lines.push(`- 最近事件: ${progress.method}`);
-    }
-    if (progress.turnId) {
-      lines.push(`- Turn: ${progress.turnId.slice(0, 8)}...`);
+    const queueLength = this.getChatQueueLength(progress.chatId);
+    if (queueLength > 0) {
+      lines.push(`- 排队消息: ${queueLength} 条`);
     }
 
-    lines.push('- 可发送 /stat 查看详情，或发送 /stop 中断任务。');
+    lines.push('');
+    lines.push('可发送 /stat 查看详情，或发送 /stop 中断任务。');
 
     return lines.join('\n');
+  }
+}
+
+// 面向用户的阶段描述：不暴露 turn、app-server 等内部概念。
+function formatActivityPhaseForNotice(phase: ActivityPhase): string {
+  switch (phase) {
+    case 'received':
+      return '已收到消息';
+    case 'starting':
+      return '正在启动会话';
+    case 'ready':
+      return '会话已就绪';
+    case 'turn_starting':
+      return '正在开始处理';
+    case 'turn_running':
+      return '正在处理';
+    case 'turn_finishing':
+      return '正在整理结果';
+    case 'sending_response':
+      return '正在发送回复';
+    case 'cleanup':
+      return '正在收尾';
+    default:
+      return phase;
   }
 }
 
